@@ -10,9 +10,7 @@ import (
 
 	"github.com/moov-io/iso8583/encoding"
 	"github.com/moov-io/iso8583/prefix"
-	stringSort "github.com/moov-io/iso8583/sort"
-
-	intSort "sort"
+	"github.com/moov-io/iso8583/sort"
 
 	"github.com/moov-io/iso8583/padding"
 	"github.com/moov-io/iso8583/utils"
@@ -66,8 +64,6 @@ type Composite struct {
 
 	orderedSpecFieldTags []string
 
-	bitmap *Bitmap
-
 	// stores all fields according to the spec
 	subfields map[string]Field
 
@@ -81,6 +77,7 @@ type Composite struct {
 func NewComposite(spec *Spec) *Composite {
 	f := &Composite{}
 	f.SetSpec(spec)
+	f.ConstructSubfields()
 
 	return f
 }
@@ -118,35 +115,21 @@ func (f *Composite) getSubfields() map[string]Field {
 // should only pass None or nil values for ths type. Passing any other value
 // will result in a panic.
 func (f *Composite) SetSpec(spec *Spec) {
-	bitmap, hasBitmap := spec.Subfields["0"].(*Bitmap)
-	hasTags := spec.Tag != nil && spec.Tag.Sort != nil
-
-	if !hasTags && !hasBitmap {
-		panic(errors.New("Composite spec requires a Tag.Sort function or a Bitmap to be defined"))
+	if err := validateCompositeSpec(spec); err != nil {
+		panic(err)
 	}
-	if hasTags && hasBitmap {
-		panic(errors.New("Composite spec doesn't support Tag.Sort function when a Bitmap is defined on spec"))
-	}
-	if spec.Tag != nil && spec.Tag.Enc == nil && spec.Tag.Length > 0 {
-		panic(errors.New("Composite spec requires a Tag.Enc to be defined if Tag.Length > 0"))
-	}
-	if spec.Pad != nil && spec.Pad != padding.None {
-		panic(errors.New("Composite spec only supports nil or None spec padding values"))
-	}
-	if spec.Enc != nil {
-		panic(errors.New("Composite spec only supports a nil Enc value"))
-	}
-
 	f.spec = spec
-	f.ConstructSubfields()
 
-	if hasBitmap {
-		f.bitmap = bitmap
+	var sortFn sort.StringSlice
+
+	// When bitmap is defined, always order tags by int.
+	if spec.Bitmap != nil {
+		sortFn = sort.StringsByInt
+	} else {
+		sortFn = spec.Tag.Sort
 	}
 
-	if hasTags {
-		f.orderedSpecFieldTags = orderedKeys(spec.Subfields, spec.Tag.Sort)
-	}
+	f.orderedSpecFieldTags = orderedKeys(spec.Subfields, sortFn)
 }
 
 func (f *Composite) Unmarshal(v interface{}) error {
@@ -327,7 +310,7 @@ func (f *Composite) Bytes() ([]byte, error) {
 // Bitmap returns the parsed bitmap instantiated on the key "0" of the spec.
 // In case the bitmap is not instantiated on the spec, returns nil.
 func (f *Composite) Bitmap() *Bitmap {
-	return f.bitmap
+	return f.spec.Bitmap
 }
 
 // String iterates over the receiver's subfields, packs them and converts the
@@ -381,6 +364,46 @@ func (f *Composite) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+func validateCompositeSpec(spec *Spec) error {
+	if spec.Enc != nil {
+		return fmt.Errorf("Composite spec only supports a nil Enc value")
+	}
+	if spec.Pad != nil && spec.Pad != padding.None {
+		return fmt.Errorf("Composite spec only supports nil or None spec padding values")
+	}
+	if (spec.Bitmap == nil && spec.Tag == nil) || (spec.Bitmap != nil && spec.Tag != nil) {
+		return fmt.Errorf("Composite spec only supports a definition of Bitmap or Tag, can't stand both or neither")
+	}
+
+	// If bitmap is defined, validates subfields keys.
+	// spec.Tag is not validated.
+	if spec.Bitmap != nil {
+		for key := range spec.Subfields {
+			parsedKey, err := strconv.Atoi(key)
+
+			if err != nil {
+				return fmt.Errorf("error parsing key from bitmapped subfield definition: %w", err)
+			}
+
+			if parsedKey <= 0 {
+				return fmt.Errorf("Composite spec only supports integers greater than 0 as keys for bitmapped subfields definition")
+			}
+		}
+
+		return nil
+	}
+
+	// Validate spec.Tag.
+	if spec.Tag.Sort == nil {
+		return fmt.Errorf("Composite spec requires a Tag.Sort function to define a Tag")
+	}
+	if spec.Tag.Enc == nil && spec.Tag.Length > 0 {
+		return fmt.Errorf("Composite spec requires a Tag.Enc to be defined if Tag.Length > 0")
+	}
+
+	return nil
+}
+
 func (f *Composite) pack() ([]byte, error) {
 	if f.Bitmap() != nil {
 		return f.packByBitmap()
@@ -392,20 +415,14 @@ func (f *Composite) pack() ([]byte, error) {
 func (f *Composite) packByBitmap() ([]byte, error) {
 	f.Bitmap().Reset()
 
-	ids, err := f.packableFieldIDs()
-	if err != nil {
-		return nil, fmt.Errorf("failed to pack composite: %w", err)
-	}
-
 	// Set bitmap bits for all fields that are present.
-	for _, id := range ids {
-		// Index 0 is for bitmap, cannot be set on bitmap.
-		// Regular field number starts from index 1
-		if id == 0 {
-			continue
+	for id := range f.setSubfields {
+		idInt, err := strconv.Atoi(id)
+		if err != nil {
+			return nil, fmt.Errorf("failed to pack composite: %w", err)
 		}
 
-		f.Bitmap().Set(id)
+		f.Bitmap().Set(idInt)
 	}
 
 	// pack bitmap.
@@ -415,16 +432,19 @@ func (f *Composite) packByBitmap() ([]byte, error) {
 	}
 
 	// pack fields
-	for _, i := range ids {
-		istr := strconv.Itoa(i)
+	for _, i := range f.orderedSpecFieldTags {
+		// If this ordered field is not set, continue to the next field.
+		if _, ok := f.setSubfields[i]; !ok {
+			continue
+		}
 
-		field, ok := f.subfields[istr]
+		field, ok := f.subfields[i]
 		if !ok {
-			return nil, fmt.Errorf("failed to pack subfield %v: no specification found", istr)
+			return nil, fmt.Errorf("failed to pack subfield %v: no specification found", i)
 		}
 		packedField, err := field.Pack()
 		if err != nil {
-			return nil, fmt.Errorf("failed to pack subfield %v (%s): %w", istr, field.Spec().Description, err)
+			return nil, fmt.Errorf("failed to pack subfield %v (%s): %w", i, field.Spec().Description, err)
 		}
 		packed = append(packed, packedField...)
 	}
@@ -593,7 +613,7 @@ func (f *Composite) skipUnknownTLVTags() bool {
 	return f.spec.Tag != nil && f.spec.Tag.SkipUnknownTLVTags && f.spec.Tag.Enc == encoding.BerTLVTag
 }
 
-func orderedKeys(kvs map[string]Field, sorter stringSort.StringSlice) []string {
+func orderedKeys(kvs map[string]Field, sorter sort.StringSlice) []string {
 	keys := make([]string, 0, len(kvs))
 	for k := range kvs {
 		keys = append(keys, k)
@@ -619,27 +639,4 @@ func getFieldIndexOrTag(field reflect.StructField) (string, error) {
 	}
 
 	return "", nil
-}
-
-func (f *Composite) packableFieldIDs() ([]int, error) {
-	// Index 0 represent bitmap which is always populated.
-	populatedFieldIDs := []int{0}
-
-	for id := range f.setSubfields {
-		// Represents the bitmap.
-		if id == "0" {
-			continue
-		}
-
-		idInt, err := strconv.Atoi(id)
-		if err != nil {
-			return nil, fmt.Errorf("failed to pack composite: %w", err)
-		}
-
-		populatedFieldIDs = append(populatedFieldIDs, idInt)
-	}
-
-	intSort.Ints(populatedFieldIDs)
-
-	return populatedFieldIDs, nil
 }

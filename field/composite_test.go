@@ -99,13 +99,13 @@ var (
 		Length:      32,
 		Description: "Test Spec",
 		Pref:        prefix.ASCII.LL,
+		Bitmap: NewBitmap(&Spec{
+			Length:      8,
+			Description: "Bitmap",
+			Enc:         encoding.BytesToASCIIHex,
+			Pref:        prefix.Hex.Fixed,
+		}),
 		Subfields: map[string]Field{
-			"0": NewBitmap(&Spec{
-				Length:      8,
-				Description: "Bitmap",
-				Enc:         encoding.BytesToASCIIHex,
-				Pref:        prefix.Hex.Fixed,
-			}),
 			"2": NewString(&Spec{
 				Length:      2,
 				Description: "String Field",
@@ -144,13 +144,13 @@ var (
 		Length:      30,
 		Description: "Test Spec",
 		Pref:        prefix.ASCII.LL,
+		Bitmap: NewBitmap(&Spec{
+			Length:      3,
+			Description: "Bitmap",
+			Enc:         encoding.BytesToASCIIHex,
+			Pref:        prefix.Hex.Fixed,
+		}),
 		Subfields: map[string]Field{
-			"0": NewBitmap(&Spec{
-				Length:      3,
-				Description: "Bitmap",
-				Enc:         encoding.BytesToASCIIHex,
-				Pref:        prefix.Hex.Fixed,
-			}),
 			"2": NewString(&Spec{
 				Length:      2,
 				Description: "String Field",
@@ -1049,12 +1049,12 @@ func TestCompositePackingWithBitmap(t *testing.T) {
 		invalidSpec := &Spec{
 			Length: 20,
 			Pref:   prefix.ASCII.Fixed,
+			Bitmap: NewBitmap(&Spec{
+				Length: 8,
+				Pref:   prefix.Binary.Fixed,
+				Enc:    encoding.Binary,
+			}),
 			Subfields: map[string]Field{
-				"0": NewBitmap(&Spec{
-					Length: 8,
-					Pref:   prefix.Binary.Fixed,
-					Enc:    encoding.Binary,
-				}),
 				"2": NewString(&Spec{
 					Length: 2,
 					Enc:    encoding.ASCII,
@@ -1086,12 +1086,12 @@ func TestCompositePackingWithBitmap(t *testing.T) {
 		invalidSpec := &Spec{
 			Length: 5,
 			Pref:   prefix.ASCII.LL,
+			Bitmap: NewBitmap(&Spec{
+				Length: 8,
+				Pref:   prefix.Binary.Fixed,
+				Enc:    encoding.Binary,
+			}),
 			Subfields: map[string]Field{
-				"0": NewBitmap(&Spec{
-					Length: 8,
-					Pref:   prefix.Binary.Fixed,
-					Enc:    encoding.Binary,
-				}),
 				"2": NewString(&Spec{
 					Length: 2,
 					Enc:    encoding.ASCII,
@@ -1389,13 +1389,12 @@ func TestCompositeHandlesValidSpecs(t *testing.T) {
 			spec: &Spec{
 				Length: 6,
 				Pref:   prefix.ASCII.Fixed,
-				Subfields: map[string]Field{
-					"0": NewBitmap(&Spec{
-						Length: 8,
-						Pref:   prefix.Binary.Fixed,
-						Enc:    encoding.Binary,
-					}),
-				},
+				Bitmap: NewBitmap(&Spec{
+					Length: 8,
+					Pref:   prefix.Binary.Fixed,
+					Enc:    encoding.Binary,
+				}),
+				Subfields: map[string]Field{},
 			},
 		},
 	}
@@ -1420,24 +1419,16 @@ func TestCompositePanicsOnSpecValidationFailures(t *testing.T) {
 		spec *Spec
 	}{
 		{
-			desc: "panics on nil Tag and no bitmap being defined in spec",
-			err:  "Composite spec requires a Tag.Sort function or a Bitmap to be defined",
+			desc: "panics on non-nil Enc value being defined in spec",
+			err:  "Composite spec only supports a nil Enc value",
 			spec: &Spec{
 				Length:    6,
+				Enc:       encoding.ASCII,
 				Pref:      prefix.ASCII.Fixed,
-				Pad:       padding.Left('0'),
 				Subfields: map[string]Field{},
-			},
-		},
-		{
-			desc: "panics on nil Tag.Sort and no bitmap being defined in spec",
-			err:  "Composite spec requires a Tag.Sort function or a Bitmap to be defined",
-			spec: &Spec{
-				Length:    6,
-				Pref:      prefix.ASCII.Fixed,
-				Pad:       padding.Left('0'),
-				Subfields: map[string]Field{},
-				Tag:       &TagSpec{},
+				Tag: &TagSpec{
+					Sort: sort.StringsByInt,
+				},
 			},
 		},
 		{
@@ -1454,16 +1445,79 @@ func TestCompositePanicsOnSpecValidationFailures(t *testing.T) {
 			},
 		},
 		{
-			desc: "panics on non-nil Enc value being defined in spec",
-			err:  "Composite spec only supports a nil Enc value",
+			desc: "panics on no Tag and no Bitmap being defined in spec",
+			err:  "Composite spec only supports a definition of Bitmap or Tag, can't stand both or neither",
 			spec: &Spec{
 				Length:    6,
-				Enc:       encoding.ASCII,
 				Pref:      prefix.ASCII.Fixed,
 				Subfields: map[string]Field{},
+			},
+		},
+		{
+			desc: "panics on both Tag and Bitmap being defined in spec",
+			err:  "Composite spec only supports a definition of Bitmap or Tag, can't stand both or neither",
+			spec: &Spec{
+				Length: 6,
+				Pref:   prefix.ASCII.Fixed,
 				Tag: &TagSpec{
 					Sort: sort.StringsByInt,
 				},
+				Bitmap: NewBitmap(&Spec{
+					Length: 8,
+					Pref:   prefix.Binary.Fixed,
+					Enc:    encoding.Binary,
+				}),
+				Subfields: map[string]Field{},
+			},
+		},
+		{
+			desc: "panics on invalid int defined as a subfield key on a bitmap definition",
+			err:  "error parsing key from bitmapped subfield definition: strconv.Atoi: parsing \"invalid\": invalid syntax",
+			spec: &Spec{
+				Length: 6,
+				Pref:   prefix.ASCII.Fixed,
+				Bitmap: NewBitmap(&Spec{
+					Length: 8,
+					Pref:   prefix.Binary.Fixed,
+					Enc:    encoding.Binary,
+				}),
+				Subfields: map[string]Field{
+					"invalid": NewString(&Spec{
+						Length: 1,
+						Pref:   prefix.ASCII.Fixed,
+						Enc:    encoding.ASCII,
+					}),
+				},
+			},
+		},
+		{
+			desc: "panics on an int lower than 1 defined as a subfield key on a bitmap definition",
+			err:  "Composite spec only supports integers greater than 0 as keys for bitmapped subfields definition",
+			spec: &Spec{
+				Length: 6,
+				Pref:   prefix.ASCII.Fixed,
+				Bitmap: NewBitmap(&Spec{
+					Length: 8,
+					Pref:   prefix.Binary.Fixed,
+					Enc:    encoding.Binary,
+				}),
+				Subfields: map[string]Field{
+					"0": NewString(&Spec{
+						Length: 1,
+						Pref:   prefix.ASCII.Fixed,
+						Enc:    encoding.ASCII,
+					}),
+				},
+			},
+		},
+		{
+			desc: "panics on nil Tag.Sort",
+			err:  "Composite spec requires a Tag.Sort function to define a Tag",
+			spec: &Spec{
+				Length:    6,
+				Pref:      prefix.ASCII.Fixed,
+				Subfields: map[string]Field{},
+				Tag:       &TagSpec{},
 			},
 		},
 		{
@@ -1477,24 +1531,6 @@ func TestCompositePanicsOnSpecValidationFailures(t *testing.T) {
 					Length: 2,
 					Pad:    padding.Left('0'),
 					Sort:   sort.StringsByInt,
-				},
-			},
-		},
-		{
-			desc: "panics on tag being defined with a bitmap defined on spec",
-			err:  "Composite spec doesn't support Tag.Sort function when a Bitmap is defined on spec",
-			spec: &Spec{
-				Length: 6,
-				Pref:   prefix.ASCII.Fixed,
-				Tag: &TagSpec{
-					Sort: sort.StringsByInt,
-				},
-				Subfields: map[string]Field{
-					"0": NewBitmap(&Spec{
-						Length: 8,
-						Pref:   prefix.Binary.Fixed,
-						Enc:    encoding.Binary,
-					}),
 				},
 			},
 		},
